@@ -1,0 +1,184 @@
+---
+title: "Human Activity Recognition and Dumbbell Exercise Classe"
+author: "Elizaveta Karaseva"
+date: "December 22, 2018"
+source: http://groupware.les.inf.puc-rio.br/har
+output: html_document
+---
+
+## Overview
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. It consists of different metrics measured while doing exercises with a dumbbell. It also includes a manner in whih every exercise was performed ("classe" variable). The goal of the project is to predict the manner in which they did the exercise. 
+
+This report describes the model building process including different steps such as feature selection and cross-validation.
+
+5 classification algorithms have been reviewed, but only the best performing are demonstrated in this report - Random Forest and Boosting. For expected Accuracy Rates, Out of Sample Errors and Final Predictions, refer to "Models Review and Prediction" section in the bottom of this document.
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+## load packages
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(gridExtra)
+set.seed(123)
+```
+
+## Read Data
+
+There is a set of statistical metrics with missing values that summarises results of measurements within each window (avg, var etc). Because the final goal is to classiffy each problem_id from the testing set, it doesn't seem approproate to rely on the metrics missing from the training set. Therefore, as the initial feature selection step, we recommend removing missing values from the training dataset.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+setwd("D://OneDrive//Datascience//Coursera Johns Hopkins Data Science//DS - Practical Machine Learning//Week 4 - Regularized Regression, Combining Predictors")
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+names <- c('magnet_forearm_z','magnet_forearm_y','magnet_forearm_x','accel_forearm_z'
+           ,'accel_forearm_y','accel_forearm_x','gyros_forearm_z','gyros_forearm_y'
+           ,'gyros_forearm_x','total_accel_forearm','yaw_forearm','pitch_forearm'
+           ,'roll_forearm','magnet_dumbbell_z','magnet_dumbbell_y'
+           ,'magnet_dumbbell_x','accel_dumbbell_z','accel_dumbbell_y'
+           ,'accel_dumbbell_x','gyros_dumbbell_z','gyros_dumbbell_y'
+           ,'gyros_dumbbell_x','total_accel_dumbbell','yaw_dumbbell'
+           ,'pitch_dumbbell','roll_dumbbell','magnet_arm_z','magnet_arm_y'
+           ,'magnet_arm_x','accel_arm_z','accel_arm_y','accel_arm_x'
+           ,'gyros_arm_z','gyros_arm_y','gyros_arm_x','total_accel_arm'
+           ,'yaw_arm','pitch_arm','roll_arm','magnet_belt_z','magnet_belt_y'
+           ,'magnet_belt_x','accel_belt_z','accel_belt_y','accel_belt_x'
+           ,'gyros_belt_z','gyros_belt_y','gyros_belt_x','total_accel_belt'
+           ,'yaw_belt','pitch_belt','roll_belt')
+
+training <- training[,c('classe', names)]
+inBuild <- createDataPartition(y=training$classe,
+                               p=0.7, list=FALSE)
+validation <- training[-inBuild,]; training <- training[inBuild,]
+testing <- testing[,c('problem_id', names)]
+```
+
+The training set was further split into training (70%) and validation (30%) sets. And here is the breakdown:
+
+```{r}
+dim(training); dim(validation); dim(testing)
+```
+
+Training set will be used for exploration, feature selection and modeling purposes. Validation set will be used to asses accuracy of trained models. And finally, testing data set will be used to predict classe levels.
+
+##Exploratory and Feature Selection
+
+First, let's see how many levels of each classe represented in the training data set and if there are relationships between potential predictors in a dataset.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+
+g1 <- ggplot(data = training) +
+        geom_histogram(aes(x = classe, fill = classe), stat="count") +
+        ggtitle("Distribution of classe levels")
+
+## correlation matrix
+corM <- cor(training[,-c(1,2)])
+corDF <- setDT(data.frame(corM), keep.rownames = TRUE)
+corDF_2 <- corDF %>% 
+        gather(pair, correlation, -rn) %>%
+        mutate(paired = paste(rn, pair, sep = " - ")) %>%
+        select(paired, correlation) %>%
+        subset(correlation != 1)
+
+g2 <- ggplot(data = corDF_2, aes(paired, correlation)) + 
+        geom_point() +
+        ggtitle("Correlations accross 2652 variable pairs (excl. self-correlation)") + 
+        theme(axis.title.x=element_blank(),
+              axis.text.x=element_blank(),
+              axis.ticks.x=element_blank())
+
+grid.arrange(g1, g2, ncol = 2)
+```
+
+According to the correlation matrix, there are quite a few variables that are highly correlated. Some correlations are obvious, like for example, correlation between **total_accel_belt** and **accel_belt_z** or **magnet_belt_x** and **accel_belt_x**. Some are more interesting, like **gyros_forearm_z** and **gyros_dumbbell_z**. 
+
+One of the standard procedures in feature selection process is to remove highly correlated variables. However, after multiple modeling trials, it was cocluded that removing highly correlated variables from our training data reduces prediction accuracy on validation data set. Therefore, we refrain from removing correlated variables. In addition, there is an explanation from mechanical engineering - 3 measuring devices (accelerometer, gyroscope and magnet) are used to calibrate measuring errors for pitch, roll and yaw calculations. Thus, by removing some measurments, we will stay with more bias in our data. 
+
+Multiple variables have been studied using various plots, but it wasn't easy to identify if there were any specific patterns within sets of 2-4 variables. See one of the examples below:
+
+```{r, warning=FALSE, message=FALSE}
+featurePlot(x=training[,16:18], y=training[,1], plot="ellipse")
+```
+
+That implies, that linear classification will be harder to implement. Therefore, we will use other machine learining algorithms that tuned well for classification problems like that one.
+
+##Modeling Overview
+
+Multiple Machine Learning Algorithms have been applied to training data set:
+
+- rpart (Decision Trees)
+
+- svm (Support Vector Machines)
+
+- rf (Random Forest)
+
+- gbm (Boosted Tree)
+
+- nb (Naive Bayes)
+
+###Preprocess
+
+Multiple adjustments have been reviewed:
+
+- PCA
+
+- Normalization (center and scale)
+
+After adjusting for different preprocession options, it was discovered, that PCA tended to recude accuracy for any selected model. At the same time, centering and scaling variables helped improve prediction accuracy on validation data sets. Therefore, we recommned refrain from applying PCA for this data set and use "center" and "scale" preprocessing options.
+
+###Cross-Validation
+
+To reduce bias of the prediction algorithms, the following cross-validation parameters have been set:
+
+```{r}
+TrainingParameters <- trainControl(method = "repeatedcv", number = 10, repeats=3)
+```
+
+##Modeling Results
+
+In this report, we will only demonstrate algorithms that performed the best - Random Forest and Boosted Trees. Support Vector Machines, Naive Bayes and Decision Tree algorithms have been reviewed but they didn't show satisfactory accuracy rates. To avoid computatinal complications, only beest performing algorithms will be demonstrated in this report.
+
+###Random Forest
+```{r, warning=FALSE, message=FALSE}
+randomForest <- train(classe ~ .
+                      ,method="rf"
+                      , preProcess = c("center","scale")
+                      , trControl = TrainingParameters
+                      , data=training)
+importance <- varImp(randomForest, scale=FALSE)
+plot(importance)
+```        
+
+Some of the variables like **roll_belt**, **pitch_forearm** have very high importance. These results can be used to further work on feature selection. 
+
+###Boosted Tree
+```{r, results='hide', message=FALSE, warning=FALSE}
+boostedTree <- train(classe ~ .
+                             ,method="gbm"
+                             , preProcess = c("center","scale")
+                             , trControl = TrainingParameters
+                             , data=training
+        )
+```
+
+##Models Review and Prediction
+
+###Confusion Matrices and Out of Sample Errors
+```{r}
+confusionMatrix(validation$classe,predict(randomForest,validation))
+###Out of Sample Error
+1 - sum(predict(randomForest,validation) == validation$classe)/length(predict(randomForest,validation))
+
+confusionMatrix(validation$classe,predict(boostedTree,validation))
+###Out of Sample Error
+1 - sum(predict(boostedTree,validation) == validation$classe)/length(predict(boostedTree,validation))
+
+```
+
+###Final Prediction
+```{r}
+predict(randomForest, testing)
+predict(boostedTree, testing)
+```
